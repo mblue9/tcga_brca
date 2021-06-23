@@ -4,7 +4,7 @@ subtitle: "Differential expression analysis of HER2 samples in breast cancer"
 author: "Maria Doyle"
 date: "`r format(Sys.time(), '%d %B %Y')`"
 output: 
-    html_document:
+    html_notebook:
         toc: true
         toc_float: true
 ---
@@ -43,7 +43,7 @@ BiocManager::install(c("tidybulk", "tidySummarizedExperiment", "tidyverse"))
 Set theme for plots
 ```{r}
 # Use colourblind-friendly colours from http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/. Ordered here to have her2_neg grey, her2_low blue and her2_pos yellow
-friendly_cols <- c("#999999", "#56B4E9", "#E69F00")
+friendly_cols <- c("#56B4E9", "#999999", "#E69F00")
 
 # Set theme
 custom_theme <-
