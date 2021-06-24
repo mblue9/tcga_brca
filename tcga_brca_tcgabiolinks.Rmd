@@ -1,0 +1,311 @@
+---
+title: "TCGA tutorial"
+subtitle: "Testing TCGAbiolinks"
+author: "Maria Doyle"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+    html_document:
+        toc: true
+        toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+This is a tutorial to show how to perform differential expression using TCGA RNA-seq data. It uses the TCGA breast cancer (BRCA) dataset and performs differential expression analysis of HER2 samples using limma-voom. The analysis uses tidyverse and tidybulk packages.
+
+### Acknowledgements
+Thanks to Franco Caramia and James McCracken for input on the workflow. And to Stefano Mangiola as this builds on previous tidytranscriptomics workshops. 
+
+### Packages
+
+Load the packages we need.
+
+```{r message = FALSE}
+library(TCGAbiolinks)
+library(readr)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(tidybulk)
+library(tidySummarizedExperiment)
+```
+
+If you need to install the packages you can run below.
+```{r eval = FALSE}
+if (!requireNamespace("BiocManager"))
+    install.packages("BiocManager")
+BiocManager::install(c("tidybulk", "tidySummarizedExperiment", "TCGAbiolinks", "tidyverse"))
+```
+
+Set theme for plots
+```{r}
+# Use colourblind-friendly colours from http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/. Ordered here to have her2_neg grey, her2_low blue and her2_pos yellow
+friendly_cols <- c("#56B4E9", "#999999", "#E69F00")
+
+# Set theme
+custom_theme <-
+  list(
+    scale_fill_manual(values = friendly_cols),
+    scale_color_manual(values = friendly_cols),
+    theme_bw() +
+      theme(
+        panel.border = element_blank(),
+        axis.line = element_line(),
+        panel.grid.major = element_line(size = 0.2),
+        panel.grid.minor = element_line(size = 0.1),
+        text = element_text(size = 12),
+        legend.position = "bottom",
+        strip.background = element_blank(),
+        axis.title.x = element_text(margin = margin(t = 10, r = 10, b = 10, l = 10)),
+        axis.title.y = element_text(margin = margin(t = 10, r = 10, b = 10, l = 10)),
+        axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1)
+      )
+  )
+```
+
+### Data files
+
+We can download using TCGAbiolinks package. 
+We will use the normalised RNA-seq data.
+
+This step is slow. Maybe try curatedTCGA package https://waldronlab.io/PublicDataResources/articles/PublicDataResources.html#levi-waldron-1
+
+```{r}
+query <- GDCquery(project = "TCGA-BRCA",
+                           data.category = "Gene expression",
+                           data.type = "Gene expression quantification",
+                           platform = "Illumina HiSeq", 
+                           file.type  = "normalized_results",
+                           experimental.strategy = "RNA-Seq",
+                           legacy = TRUE)
+GDCdownload(query, method = "api", files.per.chunk = 10)
+counts_se <- GDCprepare(query)
+```
+
+Get the clinical info as HER2 is not in the clinical into that gets added to the SE by default. Get from "Clinical data" file https://bioconductor.org/packages/release/bioc/vignettes/TCGAbiolinks/inst/doc/clinical.html#Legacy_archive_files
+
+
+```{r}
+query_clin <- GDCquery(project = "TCGA-BRCA", 
+                  data.category = "Clinical",
+                  data.type = "Clinical data",
+                  file.type = "txt",
+                  legacy = TRUE)
+GDCdownload(query_clin)
+clinical_list <- GDCprepare(query_clin)
+```
+
+This gives us a list containing a few tables.
+
+```{r}
+names(clinical_list)
+```
+
+## Setting up the data
+
+We'll save the brca patient table with a shorter name.
+
+```{r}
+clinical_patient_brca <- clinical_list$clinical_patient_brca
+```
+
+There are a few columns for HER2.
+
+```{r}
+clinical_patient_brca %>% select(contains("HER2")) %>% colnames()
+```
+
+We'll use the her2_ihc_score and HER2_FISH_STATUS columns. We'll check how mnay samples we've got for each category in these columns.
+
+```{r}
+clinical_patient_brca %>% count(her2_ihc_score, her2_fish_status)
+```
+
+We will create a column for the her2 groups of interest. We'll call samples
+Her2_pos if her2_ihc_score = 3 and/or her2_fish_status = Positive
+Her2_low if her2_ihc_score = 1 or 2 and her2_fish_status = Negative
+Her2_neg if her2_ihc_scoreE = 0
+
+We'll also filter to only keep samples that are in our groups of interest and select just the patient id and her2 group columns.
+
+```{r}
+groups <- c("HER2_pos", "HER2_low", "HER2_neg")
+
+tcga_her2 <- clinical_patient_brca %>% 
+    mutate(her2_group = case_when((her2_ihc_score == 3 | her2_fish_status == "Positive") ~ "HER2_pos",
+                             ((her2_ihc_score == 1 | her2_ihc_score == 2) & her2_fish_status == "Negative") ~ "HER2_low",
+                             her2_ihc_score == 0 ~ "HER2_neg"
+                             )) %>%
+    filter(her2_group %in% groups) %>%
+    select(bcr_patient_barcode, her2_group)
+
+tcga_her2
+```
+
+To add the her2 group information to the counts table, we match them on the TCGA patient barcode.
+
+The next step doesn't work so all steps below commented out.
+
+```{r}
+# # Join counts to her2 status using sample id
+# tcga_joined <- inner_join(counts_se, tcga_her2, by = c("barcode" = "bcr_patient_barcode"))
+# 
+# tcga_joined
+```
+
+## Exploratory analysis
+
+### Density plots
+
+Create density plots to visualise the distributions of counts for the samples.
+
+```{r}
+# tcga_joined %>%
+#     ggplot(aes(x = value + 1, group = name, colour= her2_group)) + 
+#     geom_density() +
+#     scale_x_log10() +
+#     custom_theme
+```
+
+The peak on the left shows there are a lot of genes with zero/low counts. We should filter these genes. 
+
+We'll use the tidybulk package to do the RNA-seq filtering and analysis. First we create a tidybulk tibble (table).
+```{r}
+# counts_tt <- tcga_joined %>% 
+#     mutate(Entrez_Gene_Id = as.character(Entrez_Gene_Id)) %>%
+#     tidybulk(.sample = name, .transcript = Entrez_Gene_Id, .abundance = value)
+# 
+# counts_tt
+```
+
+There are duplicated genes - same symbol, same gene id - don't know why e.g. CC2D2B, id 387707. We'll aggregate these. By default it will sum the counts for these duplicated genes. 
+
+```{r cache = TRUE}
+# Note to self - caching this step for the moment in the Rmd as it's slow
+
+# counts_dupsrem <- counts_tt %>% aggregate_duplicates()
+```
+
+After removing duplicate genes, we'll convert to tidySummarizedExperiment format as that will more efficiently handle this large dataset, will be quicker to process.
+
+```{r}
+# counts_se <- counts_dupsrem  %>% as_SummarizedExperiment()
+```
+
+### Filtering lowly expressed
+
+Now we'll filter low counts. We'll filter using the her2 group information. This uses edgeR filterbyExpr,
+```{r}
+# counts_filtered <- counts_se %>% keep_abundant(factor_of_interest = her2_group)
+```
+
+Check density plots.
+
+```{r}
+# counts_filtered %>%
+#     ggplot(aes(x = value + 1, group = sample, colour = her2_group)) + 
+#     geom_density() +
+#     scale_x_log10() +
+#     custom_theme
+```
+
+Now the peak on the left is gone.
+
+
+### RLE plots
+
+We'll use RLE plots to check the normalisation. Ref https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0191629
+
+We'll randomly select 50 samples to be able to see the boxplots.
+
+```{r}
+# Get 50 samples from distinct values of sample id
+# num <- 50
+# sample_ids <- counts_filtered %>% 
+#   distinct(sample) %>% 
+#   slice_sample(n=num) %>% 
+#   pull()
+# 
+# # Extract these samples from the full dataset
+# counts_subsampled <- counts_filtered %>% filter(sample %in% sample_ids)
+```
+
+To create the RLE plots we calculate the median log count for each gene and subtract that from the log count for that gene in each sample.
+
+```{r}
+# counts_subsampled  %>%
+#     group_by(feature) %>%
+#     mutate(gene_median_log = median(log2(value + 1)), 
+#            rle = log2(value + 1) - gene_median_log) %>%
+#     ggplot(aes(x=sample, y=rle, fill = her2_group)) + 
+#     geom_boxplot(outlier.shape = NA) +
+#     custom_theme
+```
+
+### PCA plots
+
+We'll create PCA plots to see how the samples group.
+
+```{r}
+#Calculate dimensions
+# counts_PCA <-
+#   counts_filtered %>%
+#   reduce_dimensions(method = "PCA")
+```
+
+
+```{r}
+# Plot PCs
+# counts_PCA %>%
+#   pivot_sample() %>%
+#   ggplot(aes(x = PC1, y = PC2, colour = her2_group)) +
+#   geom_point() +
+#   custom_theme
+```
+
+## Differential expression
+
+We'll perform differential expression with limma-voom. 
+We'll compare the HER2_pos to the HER2_neg group.
+
+```{r}
+#  counts_de <- counts_PCA %>%
+#     test_differential_abundance(
+#     ~ 0 + her2_group,
+#     .contrasts = c("her2_groupHER2_pos - her2_groupHER2_neg"),
+#     omit_contrast_in_colnames = TRUE,
+#     method = "limma_voom"
+#   )
+# 
+# counts_de
+```
+
+### P values histogram
+
+Create histogram of P values. Check if histogram of P values looks appropriate. Ref https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6164648/
+
+```{r}
+ # counts_de %>%    
+ #    pivot_transcript() %>% 
+ #    ggplot(aes(x = P.Value)) +
+ #    geom_histogram(binwidth= 0.01) +
+ #    custom_theme
+```
+
+If you want to save the differential expression results table to a file.
+
+```{r eval= FALSE}
+ # counts_de %>% 
+ #    pivot_transcript() %>% 
+ #    write_tsv("tcga_her2_pos_vs_neg.tsv")
+```
+
+Record R and package versions.
+
+```{r}
+sessionInfo()
+```
